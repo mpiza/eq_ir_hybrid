@@ -70,13 +70,33 @@ def B_HW(t: float, T: float, alpha: float) -> float:
         
     return (1.0 - np.exp(-alpha * dt)) / alpha
 
+def integrate_simpson(f, t0: float, t1: float, n: int = 10) -> float:
+    """
+    Simpson's rule integration of function f over [t0, t1].
+    
+    Args:
+        f: Function to integrate
+        t0: Start point
+        t1: End point
+        n: Number of intervals (must be even)
+    """
+    if n % 2 != 0:
+        n += 1  # Ensure n is even
+    
+    h = (t1 - t0) / n
+    x = np.linspace(t0, t1, n+1)
+    y = np.array([f(xi) for xi in x])
+    
+    return h/3 * (y[0] + y[-1] + 4*sum(y[1:-1:2]) + 2*sum(y[2:-1:2]))
+
 def integrated_variance(
     tgrid: np.ndarray,
     sigmaS: np.ndarray,
     alpha: float,
     sigma_r: Callable[[float], float],
     B_func: Callable[[float, float, float], float],
-    rho: float
+    rho: float,
+    method: str = "trapezoid"
 ) -> float:
     """
     Compute the integrated variance for the hybrid equity-rate model.
@@ -94,6 +114,7 @@ def integrated_variance(
         sigma_r: Function t -> sigma_r(t) for rate volatility
         B_func: Bond scaling factor function (e.g., B_HW)
         rho: Correlation between equity and rates
+        method: Integration method ("trapezoid" or "simpson")
         
     Returns:
         float: Total integrated variance
@@ -111,9 +132,12 @@ def integrated_variance(
             sr = sigma_r(t)
             return sS**2 + 2*rho*sS*Br*sr + (Br*sr)**2
 
-        val0 = integrand(t0)
-        val1 = integrand(t1)
-        total += 0.5*(val0 + val1)*(t1 - t0)
+        if method == "simpson":
+            total += integrate_simpson(integrand, t0, t1)
+        else:  # trapezoid
+            val0 = integrand(t0)
+            val1 = integrand(t1)
+            total += 0.5*(val0 + val1)*(t1 - t0)
 
     return total
 
@@ -123,7 +147,8 @@ def implied_vol(
     alpha: float,
     sigma_r: Callable[[float], float],
     B_func: Callable[[float, float, float], float],
-    rho: float
+    rho: float,
+    method: str = "trapezoid"
 ) -> float:
     """
     Compute Black-Scholes implied volatility for given parameters.
@@ -138,6 +163,7 @@ def implied_vol(
         sigma_r: Rate volatility function
         B_func: Bond scaling factor function
         rho: Equity-rate correlation
+        method: Integration method ("trapezoid" or "simpson")
         
     Returns:
         float: Black-Scholes implied volatility
@@ -149,7 +175,7 @@ def implied_vol(
     if T <= 0:
         raise ValueError("Maturity must be positive")
     
-    var_T = integrated_variance(tgrid, sigmaS, alpha, sigma_r, B_func, rho)
+    var_T = integrated_variance(tgrid, sigmaS, alpha, sigma_r, B_func, rho, method=method)
     return np.sqrt(var_T / T)
 
 def bs_call_price(F: float, K: float, T: float, vol: float) -> float:
@@ -194,7 +220,8 @@ def option_price_hw_equity(
     alpha: float,
     sigma_r: Callable[[float], float],
     B_func: Callable[[float, float, float], float],
-    rho: float
+    rho: float,
+    method: str = "trapezoid"
 ) -> float:
     """
     Price a European call under the hybrid Hull-White equity model.
@@ -215,11 +242,12 @@ def option_price_hw_equity(
         sigma_r: Rate volatility function
         B_func: Bond scaling function
         rho: Equity-rate correlation
+        method: Integration method ("trapezoid" or "simpson")
         
     Returns:
         float: Call option price
     """
-    volT = implied_vol(tgrid, sigmaS, alpha, sigma_r, B_func, rho)
+    volT = implied_vol(tgrid, sigmaS, alpha, sigma_r, B_func, rho, method=method)
     F0 = S0 / P0T
     call_bs = bs_call_price(F0, K, T, volT)
     return P0T * call_bs
@@ -231,7 +259,8 @@ def bootstrap_sigmaS(
     sigma_r: Callable[[float], float],
     B_func: Callable[[float, float, float], float],
     rho: float,
-    npts_per_interval: int = 2
+    npts_per_interval: int = 2,
+    method: str = "trapezoid"
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Bootstrap piecewise constant equity volatilities from market data.
@@ -248,6 +277,7 @@ def bootstrap_sigmaS(
         B_func: Bond scaling function
         rho: Equity-rate correlation
         npts_per_interval: Number of grid points per interval
+        method: Integration method ("trapezoid" or "simpson")
         
     Returns:
         tuple: (time grid, bootstrapped volatilities)
@@ -305,7 +335,7 @@ def bootstrap_sigmaS(
             sub_tgrid = np.array(sub_tgrid)
             sub_sigma = np.array(sub_sigma)
 
-            return integrated_variance(sub_tgrid, sub_sigma, alpha, sigma_r, B_func, rho)
+            return integrated_variance(sub_tgrid, sub_sigma, alpha, sigma_r, B_func, rho, method=method)
 
         def obj(x):
             return leftover_integral(x) - target_var
@@ -355,7 +385,8 @@ def verify_calibration(
     alpha: float,
     sigma_r: Callable[[float], float],
     rho: float,
-    num_test_points: int = 100
+    num_test_points: int = 100,
+    method: str = "trapezoid"
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Verify calibration by comparing market and model implied vols.
@@ -373,6 +404,7 @@ def verify_calibration(
         sigma_r: Rate volatility function
         rho: Equity-rate correlation
         num_test_points: Number of points for testing
+        method: Integration method ("trapezoid" or "simpson")
         
     Returns:
         tuple: (test times, interpolated market vols,
@@ -383,7 +415,8 @@ def verify_calibration(
     # Bootstrap stock volatilities
     _, sigmaS_vals = bootstrap_sigmaS(
         maturities, market_vols,
-        alpha, sigma_r, B_HW, rho
+        alpha, sigma_r, B_HW, rho,
+        method=method
     )
     
     # Create dense grid for testing (include points slightly beyond last maturity)
@@ -400,7 +433,8 @@ def verify_calibration(
             test_sigmaS = np.array([stock_vols[i]])
             recomputed_vols[i] = implied_vol(
                 test_tgrid, test_sigmaS,
-                alpha, sigma_r, B_HW, rho
+                alpha, sigma_r, B_HW, rho,
+                method=method
             )
     
     # Linear interpolation of market vols for comparison
@@ -447,7 +481,7 @@ def plot_calibration_results(
     
     ax1.set_xlabel('Maturity (years)')
     ax1.set_ylabel('Volatility')
-    ax1.set_title('Market vs Stock Volatility')
+    ax1.set_title('Market vs Stock Volatility')  # Changed from setTitle to set_title
     ax1.grid(True)
     ax1.legend(loc='upper left')
     
@@ -475,7 +509,7 @@ def plot_calibration_results(
     
     ax2.set_xlabel('Maturity (years)')
     ax2.set_ylabel('Implied Volatility')
-    ax2.set_title('Calibration Verification')
+    ax2.set_title('Calibration Verification')  # Changed from setTitle to set_title
     ax2.grid(True)
     ax2.legend(loc='upper left')
     
@@ -511,7 +545,8 @@ def main():
         test_mats, interp_vols, stock_vols, recomp_vols = verify_calibration(
             maturities, market_vols,
             alpha, sigma_r_func, rho,
-            num_test_points=200  # Increased for smoother curves
+            num_test_points=200,  # Increased for smoother curves
+            method="simpson"  # Use Simpson's rule for integration
         )
         
         # Plot results with model parameters

@@ -138,8 +138,18 @@ class ModelParamsFrame(ttk.LabelFrame):
         self.const_vol_entry.grid(row=3, column=1, padx=5, pady=2)
         self.const_vol_entry.insert(0, "0.015")
 
-    def get_params(self) -> Tuple[float, float, Callable]:
-        """Get model parameters."""
+        # Integration method selection
+        ttk.Label(self, text="Integration Method:").grid(row=4, column=0, padx=5, pady=2)
+        self.int_method_var = tk.StringVar(value="trapezoid")
+        self.int_method_combo = ttk.Combobox(self, 
+                                            textvariable=self.int_method_var,
+                                            values=["trapezoid", "simpson"],
+                                            state="readonly",
+                                            width=10)
+        self.int_method_combo.grid(row=4, column=1, padx=5, pady=2)
+
+    def get_params(self) -> Tuple[float, float, Callable, str]:
+        """Get model parameters and integration method."""
         try:
             alpha = float(self.alpha_entry.get())
             rho = float(self.rho_entry.get())
@@ -160,7 +170,7 @@ class ModelParamsFrame(ttk.LabelFrame):
             else:  # humped
                 def sigma_r(t): return const_vol * (1 + np.exp(-(t - 2)**2))
                 
-            return alpha, rho, sigma_r
+            return alpha, rho, sigma_r, self.int_method_var.get()
         except Exception as e:
             raise ValueError(f"Invalid model parameters: {str(e)}")
 
@@ -192,11 +202,11 @@ class CalibrationApp:
         try:
             # Get parameters
             maturities, market_vols = self.market_frame.get_data()
-            alpha, rho, sigma_r = self.model_frame.get_params()
+            alpha, rho, sigma_r, int_method = self.model_frame.get_params()
 
             # Run calibration
             test_mats, interp_vols, stock_vols, recomp_vols = verify_calibration(
-                maturities, market_vols, alpha, sigma_r, rho, num_test_points=200
+                maturities, market_vols, alpha, sigma_r, rho, num_test_points=200, method=int_method
             )
 
             # Plot results in new window
@@ -222,7 +232,8 @@ class CalibrationApp:
                 'alpha': self.model_frame.alpha_entry.get(),
                 'rho': self.model_frame.rho_entry.get(),
                 'sigma_r_type': self.model_frame.sigma_r_var.get(),
-                'const_vol': self.model_frame.const_vol_entry.get()
+                'const_vol': self.model_frame.const_vol_entry.get(),
+                'int_method': self.model_frame.int_method_var.get()
             }
             
             with open('calibration_params.json', 'w') as f:
@@ -254,6 +265,9 @@ class CalibrationApp:
             
             self.model_frame.const_vol_entry.delete(0, tk.END)
             self.model_frame.const_vol_entry.insert(0, params['const_vol'])
+
+            if 'int_method' in params:
+                self.model_frame.int_method_var.set(params['int_method'])
             
             messagebox.showinfo("Success", "Parameters loaded successfully!")
         except FileNotFoundError:
