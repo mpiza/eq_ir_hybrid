@@ -148,7 +148,13 @@ class ModelParamsFrame(ttk.LabelFrame):
                                             width=10)
         self.int_method_combo.grid(row=4, column=1, padx=5, pady=2)
 
-    def get_params(self) -> Tuple[float, float, Callable, str]:
+        # Add points per interval input
+        ttk.Label(self, text="Points per Interval:").grid(row=5, column=0, padx=5, pady=2)
+        self.points_entry = ttk.Entry(self, width=10)
+        self.points_entry.grid(row=5, column=1, padx=5, pady=2)
+        self.points_entry.insert(0, "2")
+
+    def get_params(self) -> Tuple[float, float, Callable, str, int]:
         """Get model parameters and integration method."""
         try:
             alpha = float(self.alpha_entry.get())
@@ -169,8 +175,12 @@ class ModelParamsFrame(ttk.LabelFrame):
                 def sigma_r(t): return const_vol * (1 + 0.1 * t)
             else:  # humped
                 def sigma_r(t): return const_vol * (1 + np.exp(-(t - 2)**2))
+            
+            points = int(self.points_entry.get())
+            if points < 2:
+                raise ValueError("Points per interval must be at least 2")
                 
-            return alpha, rho, sigma_r, self.int_method_var.get()
+            return alpha, rho, sigma_r, self.int_method_var.get(), points
         except Exception as e:
             raise ValueError(f"Invalid model parameters: {str(e)}")
 
@@ -202,11 +212,14 @@ class CalibrationApp:
         try:
             # Get parameters
             maturities, market_vols = self.market_frame.get_data()
-            alpha, rho, sigma_r, int_method = self.model_frame.get_params()
+            alpha, rho, sigma_r, int_method, points = self.model_frame.get_params()
 
             # Run calibration
             test_mats, interp_vols, stock_vols, recomp_vols = verify_calibration(
-                maturities, market_vols, alpha, sigma_r, rho, num_test_points=200, method=int_method
+                maturities, market_vols, alpha, sigma_r, rho, 
+                num_test_points=200, 
+                npts_per_interval=points,  # Added parameter
+                method=int_method
             )
 
             # Plot results in new window
@@ -217,7 +230,8 @@ class CalibrationApp:
                 maturities, market_vols,
                 test_mats, interp_vols,
                 stock_vols, recomp_vols,
-                alpha, sigma_r, rho
+                alpha, sigma_r, rho,
+                points  # Added parameter
             )
 
         except Exception as e:
@@ -233,7 +247,8 @@ class CalibrationApp:
                 'rho': self.model_frame.rho_entry.get(),
                 'sigma_r_type': self.model_frame.sigma_r_var.get(),
                 'const_vol': self.model_frame.const_vol_entry.get(),
-                'int_method': self.model_frame.int_method_var.get()
+                'int_method': self.model_frame.int_method_var.get(),
+                'points_per_interval': self.model_frame.points_entry.get(),
             }
             
             with open('calibration_params.json', 'w') as f:
@@ -269,6 +284,10 @@ class CalibrationApp:
             if 'int_method' in params:
                 self.model_frame.int_method_var.set(params['int_method'])
             
+            if 'points_per_interval' in params:
+                self.model_frame.points_entry.delete(0, tk.END)
+                self.model_frame.points_entry.insert(0, params['points_per_interval'])
+
             messagebox.showinfo("Success", "Parameters loaded successfully!")
         except FileNotFoundError:
             messagebox.showwarning("Warning", "No saved parameters found.")

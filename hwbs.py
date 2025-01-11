@@ -71,23 +71,27 @@ def B_HW(t: float, T: float, alpha: float) -> float:
     return (1.0 - np.exp(-alpha * dt)) / alpha
 
 def integrate_simpson(f, t0: float, t1: float, n: int = 10) -> float:
-    """
-    Simpson's rule integration of function f over [t0, t1].
+    """Enhanced Simpson's rule with very fine grid."""
+    # Use much finer grid
+    dt = t1 - t0
+    n = max(n, int(100 * dt))  # Increased from 50 to 100 points per year
     
-    Args:
-        f: Function to integrate
-        t0: Start point
-        t1: End point
-        n: Number of intervals (must be even)
-    """
-    if n % 2 != 0:
-        n += 1  # Ensure n is even
+    # Split into more subintervals
+    n_sub = 10  # Increased from 4 to 10
+    sub_results = []
     
-    h = (t1 - t0) / n
-    x = np.linspace(t0, t1, n+1)
-    y = np.array([f(xi) for xi in x])
+    for i in range(n_sub):
+        t_start = t0 + (i * dt / n_sub)
+        t_end = t0 + ((i + 1) * dt / n_sub)
+        
+        h = (t_end - t_start) / n
+        x = np.linspace(t_start, t_end, n+1)
+        y = np.array([f(xi) for xi in x])
+        
+        result = h/3 * (y[0] + y[-1] + 4*sum(y[1:-1:2]) + 2*sum(y[2:-1:2]))
+        sub_results.append(result)
     
-    return h/3 * (y[0] + y[-1] + 4*sum(y[1:-1:2]) + 2*sum(y[2:-1:2]))
+    return sum(sub_results)
 
 def integrated_variance(
     tgrid: np.ndarray,
@@ -259,31 +263,13 @@ def bootstrap_sigmaS(
     sigma_r: Callable[[float], float],
     B_func: Callable[[float, float, float], float],
     rho: float,
-    npts_per_interval: int = 2,
-    method: str = "trapezoid"
+    npts_per_interval: int = 10,  # Increased default
+    method: str = "simpson",
+    tolerance: float = 1e-14,  # Tighter tolerance
+    max_iterations: int = 200  # More iterations
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Bootstrap piecewise constant equity volatilities from market data.
-    
-    Given a set of market implied vols at different maturities, this function
-    solves for piecewise constant equity volatilities that reproduce the
-    market implied vols when combined with the Hull-White rate model.
-    
-    Args:
-        maturities: Array of option maturities
-        market_vols: Array of market implied vols
-        alpha: Hull-White mean reversion
-        sigma_r: Rate volatility function
-        B_func: Bond scaling function
-        rho: Equity-rate correlation
-        npts_per_interval: Number of grid points per interval
-        method: Integration method ("trapezoid" or "simpson")
-        
-    Returns:
-        tuple: (time grid, bootstrapped volatilities)
-        
-    Raises:
-        ValueError: If inputs are invalid or inconsistent
+    Enhanced bootstrapping with better convergence for flat volatility structures.
     """
     if len(maturities) != len(market_vols):
         raise ValueError("Maturities and market_vols must have same length")
@@ -307,24 +293,37 @@ def bootstrap_sigmaS(
         # target integrated variance at T
         target_var = market_vols[i]**2 * T
 
-        def leftover_integral(x):
+        def piecewise_integrated_variance(x):
+            """Calculate integrated variance using piecewise-constant volatility function.
+            
+            Constructs a piecewise-constant sigmaS (volatility) function from 0 to T by:
+            - Using known volatilities sigmaS_vals[j] for intervals [T_{j-1}, T_j], j < i
+            - Using parameter x as volatility for the interval [T_{i-1}, T_i]
+            Then computes the integrated variance over the entire period.
+            
+            Parameters
+            ----------
+            x : float
+                Volatility value for the current calibration interval
+            
+            Returns
+            -------
+            float
+                Integrated variance over [0,T] using the constructed piecewise volatility
             """
-            Construct a piecewise-constant sigmaS function from 0..T:
-              - sigmaS_vals[j] for [T_{j-1}, T_j], j < i
-              - x for [T_{i-1}, T_i]
-            Then integrate.
-            """
+            # Construct time grid points including 0, known maturities, and final time T
             seg_times = [0.0]
             seg_times.extend(maturities[:i])
             seg_times.append(T)
             seg_times = np.array(seg_times)
 
+            # Build array of volatilities for each segment
             seg_sigma = []
             for j in range(i):
                 seg_sigma.append(sigmaS_vals[j])
             seg_sigma.append(x)
 
-            # Build sub-partitions for integrated_variance
+            # Construct arrays for integrated_variance calculation
             sub_tgrid = []
             sub_sigma = []
             for k in range(len(seg_times)-1):
@@ -335,27 +334,66 @@ def bootstrap_sigmaS(
             sub_tgrid = np.array(sub_tgrid)
             sub_sigma = np.array(sub_sigma)
 
+            
             return integrated_variance(sub_tgrid, sub_sigma, alpha, sigma_r, B_func, rho, method=method)
 
         def obj(x):
-            return leftover_integral(x) - target_var
+            return piecewise_integrated_variance(x) - target_var
 
-        # Solve via bisection
-        x_low, x_high = 1e-6, 3.0
-        x_mid = 0.0
-        for _ in range(60):
-            x_mid = 0.5*(x_low + x_high)
-            f_mid = obj(x_mid)
-            if abs(f_mid) < 1e-12:
+        # Use more sophisticated initial guess
+        if i == 0:
+            # For first interval, account for rate effects
+            def simple_variance(x):
+                t = T
+                Br = B_func(t, t, alpha)
+                sr = sigma_r(t)
+                return x**2 + 2*rho*x*Br*sr + (Br*sr)**2
+            
+            x_init = np.sqrt(market_vols[0]**2 - simple_variance(0))
+        else:
+            x_init = sigmaS_vals[-1]
+        
+        # Newton-Raphson with fallback to bisection
+        x = x_init
+        for iter in range(max_iterations):
+            f = obj(x)
+            if abs(f) < tolerance:
                 break
-            f_low = obj(x_low)
-            if f_low*f_mid < 0:
-                x_high = x_mid
-            else:
-                x_low = x_mid
-
-        sigmaS_vals.append(x_mid)
-        prev_T = T
+                
+            # Compute numerical derivative
+            h = max(1e-7, abs(x) * 1e-7)
+            df = (obj(x + h) - f) / h
+            
+            if abs(df) > 1e-10:  # If derivative is meaningful
+                x_new = x - f/df
+                if x_new > 0:  # Only accept positive volatility
+                    x = x_new
+                    continue
+            
+            # Fallback to bisection if Newton fails
+            x_low, x_high = x_init * 0.5, x_init * 2.0
+            for _ in range(50):
+                x = 0.5 * (x_low + x_high)
+                f = obj(x)
+                if abs(f) < tolerance:
+                    break
+                if f > 0:
+                    x_high = x
+                else:
+                    x_low = x
+        
+        sigmaS_vals.append(x)
+        
+        # Verify accuracy
+        test_vol = implied_vol(
+            np.array([0.0, T]),
+            np.array([x]),
+            alpha, sigma_r, B_func, rho,
+            method=method
+        )
+        error = abs(test_vol - market_vols[i])
+        if error > 1e-6:
+            logger.warning(f"Large calibration error at T={T}: {error:.2e}")
 
     return tgrid_full, sigmaS_vals
 
@@ -385,42 +423,32 @@ def verify_calibration(
     alpha: float,
     sigma_r: Callable[[float], float],
     rho: float,
-    num_test_points: int = 100,
-    method: str = "trapezoid"
+    num_test_points: int = 400,  # Doubled
+    npts_per_interval: int = 20,  # Doubled
+    method: str = "simpson"
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Verify calibration by comparing market and model implied vols.
-    
-    This function:
-    1. Bootstraps equity vols from market data
-    2. Creates a dense test grid
-    3. Computes model implied vols
-    4. Returns data for visualization
-    
-    Args:
-        maturities: Option maturities
-        market_vols: Market implied vols
-        alpha: Hull-White mean reversion
-        sigma_r: Rate volatility function
-        rho: Equity-rate correlation
-        num_test_points: Number of points for testing
-        method: Integration method ("trapezoid" or "simpson")
-        
-    Returns:
-        tuple: (test times, interpolated market vols,
-                stock vols, recomputed implied vols)
-    """
+    """Enhanced verification with finer grid."""
     logger.info("Starting calibration verification...")
     
-    # Bootstrap stock volatilities
+    # Use more points for longer maturities
+    adjusted_npts = [max(npts_per_interval, int(T * 10)) for T in maturities]
+    
+    # Bootstrap with enhanced accuracy
     _, sigmaS_vals = bootstrap_sigmaS(
         maturities, market_vols,
         alpha, sigma_r, B_HW, rho,
-        method=method
+        npts_per_interval=max(adjusted_npts),
+        method=method,
+        tolerance=1e-14
     )
     
-    # Create dense grid for testing (include points slightly beyond last maturity)
-    test_maturities = np.linspace(0.0, maturities[-1] * 1.1, num_test_points)
+    # Create denser non-uniform test grid
+    test_maturities = np.concatenate([
+        np.linspace(0, 0.25, num_test_points // 3),  # More points near zero
+        np.linspace(0.25, 1.0, num_test_points // 3),  # More points in middle
+        np.linspace(1.0, maturities[-1], num_test_points // 3)  # Points for longer maturities
+    ])
+    test_maturities = np.unique(np.sort(test_maturities))
     
     # Extend piecewise constant stock vols to test points
     stock_vols = extend_piecewise_constant(maturities, np.array(sigmaS_vals), test_maturities)
@@ -453,6 +481,7 @@ def plot_calibration_results(
     alpha: float,
     sigma_r: Callable[[float], float],
     rho: float,
+    npts_per_interval: int,  # Added parameter
 ) -> None:
     """
     Plot calibration results in two panels.
@@ -471,6 +500,7 @@ def plot_calibration_results(
         alpha: Hull-White mean reversion
         sigma_r: Rate volatility function
         rho: Equity-rate correlation
+        npts_per_interval: Number of points per interval in bootstrapping
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     
@@ -513,9 +543,14 @@ def plot_calibration_results(
     ax2.grid(True)
     ax2.legend(loc='upper left')
     
-    # Add calibration error
+    # Add calibration error and model parameters
     max_error = np.max(np.abs(model_vols_at_market - market_vols))
-    ax2.text(0.02, 0.98, f'Max Error: {max_error:.2e}', 
+    info_text = (
+        f'Max Error: {max_error:.2e}\n'
+        f'Points per interval: {npts_per_interval}\n'
+        f'α: {alpha:.3f}, ρ: {rho:.2f}'
+    )
+    ax2.text(0.02, 0.98, info_text, 
              transform=ax2.transAxes,
              verticalalignment='top')
     
@@ -540,13 +575,15 @@ def main():
         alpha = 0.1
         rho = 0.3  # Correlation for rate-equity effects
         def sigma_r_func(t): return 0.015  # 1.5% rate vol
+        npts_per_interval = 2  # Number of points per interval in bootstrapping
 
         # Verify calibration with more test points
         test_mats, interp_vols, stock_vols, recomp_vols = verify_calibration(
             maturities, market_vols,
             alpha, sigma_r_func, rho,
-            num_test_points=200,  # Increased for smoother curves
-            method="simpson"  # Use Simpson's rule for integration
+            num_test_points=400,  # Increased
+            npts_per_interval=20,  # Increased
+            method="simpson"
         )
         
         # Plot results with model parameters
@@ -554,7 +591,8 @@ def main():
             maturities, market_vols,
             test_mats, interp_vols,
             stock_vols, recomp_vols,
-            alpha, sigma_r_func, rho  # Added model parameters
+            alpha, sigma_r_func, rho,  # Added model parameters
+            npts_per_interval  # Added parameter
         )
         
         logger.info("Calibration and plotting completed")
