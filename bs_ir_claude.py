@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import multiprocessing
+import os
+from pathlib import Path
 
 # Set up logging
 logging.basicConfig(
@@ -114,6 +116,31 @@ class BlackScholesStochastic:
             logger.error(f"Error calculating option price: {str(e)}")
             raise
 
+    def calculate_greeks(self) -> Dict[str, float]:
+        """Calculate option Greeks."""
+        try:
+            h = 1e-5  # Step size for finite differences
+            
+            # Delta
+            price_up = BlackScholesStochastic(OptionParameters(
+                S0=self.params.S0 + h, **{k:v for k,v in self.params.__dict__.items() if k != 'S0'}
+            )).calculate_price()
+            delta = (price_up - self.calculate_price()) / h
+            
+            # Gamma
+            price_down = BlackScholesStochastic(OptionParameters(
+                S0=self.params.S0 - h, **{k:v for k,v in self.params.__dict__.items() if k != 'S0'}
+            )).calculate_price()
+            gamma = (price_up - 2*self.calculate_price() + price_down) / (h*h)
+            
+            return {
+                'delta': delta,
+                'gamma': gamma
+            }
+        except Exception as e:
+            logger.error(f"Error calculating Greeks: {str(e)}")
+            raise
+
 class OptionPricePlotter:
     """Class for plotting option prices."""
     
@@ -158,6 +185,8 @@ class OptionPricingGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Advanced Option Pricing Tool")
+        self.base_dir = Path(__file__).parent
+        self.params_file = self.base_dir / 'option_parameters.json'
         self.setup_ui()
 
     def setup_ui(self):
@@ -258,7 +287,7 @@ class OptionPricingGUI:
         """Save current parameters to file."""
         try:
             params = {key: entry.get() for key, entry in self.entries.items()}
-            with open('option_parameters.json', 'w') as f:
+            with open(self.params_file, 'w') as f:
                 json.dump(params, f)
             messagebox.showinfo("Success", "Parameters saved successfully!")
         except Exception as e:
@@ -267,7 +296,7 @@ class OptionPricingGUI:
     def load_parameters(self):
         """Load parameters from file."""
         try:
-            with open('option_parameters.json', 'r') as f:
+            with open(self.params_file, 'r') as f:
                 params = json.load(f)
             for key, value in params.items():
                 if key in self.entries:
