@@ -15,23 +15,82 @@ class MarketDataFrame(ttk.LabelFrame):
         self.setup_ui()
 
     def setup_ui(self):
-        # Maturities input
-        ttk.Label(self, text="Maturities (comma-separated):").grid(row=0, column=0, padx=5, pady=2)
-        self.maturities_entry = ttk.Entry(self, width=40)
-        self.maturities_entry.grid(row=0, column=1, padx=5, pady=2)
+        # Input mode selection
+        ttk.Label(self, text="Input Mode:").grid(row=0, column=0, padx=5, pady=2)
+        self.input_mode = tk.StringVar(value="manual")
+        mode_frame = ttk.Frame(self)
+        mode_frame.grid(row=0, column=1, sticky='w')
+        
+        ttk.Radiobutton(mode_frame, text="Manual", variable=self.input_mode,
+                       value="manual", command=self._toggle_input_mode).pack(side='left')
+        ttk.Radiobutton(mode_frame, text="Generate", variable=self.input_mode,
+                       value="generate", command=self._toggle_input_mode).pack(side='left')
+
+        # Manual input frame
+        self.manual_frame = ttk.Frame(self)
+        self.manual_frame.grid(row=1, column=0, columnspan=2, sticky='ew', padx=5, pady=2)
+        
+        ttk.Label(self.manual_frame, text="Maturities (comma-separated):").grid(row=0, column=0)
+        self.maturities_entry = ttk.Entry(self.manual_frame, width=40)
+        self.maturities_entry.grid(row=0, column=1)
         self.maturities_entry.insert(0, "0.25, 0.5, 1.0, 2.0, 3.0, 5.0")
 
-        # Volatilities input
-        ttk.Label(self, text="Market Vols (comma-separated):").grid(row=1, column=0, padx=5, pady=2)
-        self.vols_entry = ttk.Entry(self, width=40)
-        self.vols_entry.grid(row=1, column=1, padx=5, pady=2)
+        ttk.Label(self.manual_frame, text="Market Vols (comma-separated):").grid(row=1, column=0)
+        self.vols_entry = ttk.Entry(self.manual_frame, width=40)
+        self.vols_entry.grid(row=1, column=1)
         self.vols_entry.insert(0, "0.22, 0.21, 0.20, 0.22, 0.23, 0.25")
+
+        # Generate frame
+        self.generate_frame = ttk.Frame(self)
+        self.generate_frame.grid(row=2, column=0, columnspan=2, sticky='ew', padx=5, pady=2)
+        
+        ttk.Label(self.generate_frame, text="First Maturity:").grid(row=0, column=0)
+        self.first_mat_entry = ttk.Entry(self.generate_frame, width=10)
+        self.first_mat_entry.grid(row=0, column=1)
+        self.first_mat_entry.insert(0, "0.25")
+        
+        ttk.Label(self.generate_frame, text="Last Maturity:").grid(row=0, column=2, padx=(10,0))
+        self.last_mat_entry = ttk.Entry(self.generate_frame, width=10)
+        self.last_mat_entry.grid(row=0, column=3)
+        self.last_mat_entry.insert(0, "5.0")
+        
+        ttk.Label(self.generate_frame, text="Number of Points:").grid(row=1, column=0, columnspan=2)
+        self.num_points_entry = ttk.Entry(self.generate_frame, width=10)
+        self.num_points_entry.grid(row=1, column=2)
+        self.num_points_entry.insert(0, "10")
+        
+        # Initially hide generate frame
+        self.generate_frame.grid_remove()
+
+    def _toggle_input_mode(self):
+        """Toggle between manual and generate input modes."""
+        if self.input_mode.get() == "manual":
+            self.generate_frame.grid_remove()
+            self.manual_frame.grid()
+        else:
+            self.manual_frame.grid_remove()
+            self.generate_frame.grid()
 
     def get_data(self) -> Tuple[np.ndarray, np.ndarray]:
         """Get market data as numpy arrays."""
         try:
-            maturities = np.array([float(x.strip()) for x in self.maturities_entry.get().split(',')])
-            vols = np.array([float(x.strip()) for x in self.vols_entry.get().split(',')])
+            if self.input_mode.get() == "manual":
+                # Parse manual input
+                maturities = np.array([float(x.strip()) for x in self.maturities_entry.get().split(',')])
+                vols = np.array([float(x.strip()) for x in self.vols_entry.get().split(',')])
+            else:
+                # Generate evenly spaced maturities
+                t1 = float(self.first_mat_entry.get())
+                t2 = float(self.last_mat_entry.get())
+                n = int(self.num_points_entry.get())
+                
+                if t1 >= t2:
+                    raise ValueError("Last maturity must be greater than first maturity")
+                if n < 2:
+                    raise ValueError("Number of points must be at least 2")
+                
+                maturities = np.linspace(t1, t2, n)
+                vols = np.full_like(maturities, 0.2)  # Flat 20% volatility
             
             if len(maturities) != len(vols):
                 raise ValueError("Maturities and volatilities must have same length")

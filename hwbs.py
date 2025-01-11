@@ -1,3 +1,17 @@
+"""
+Hull-White Equity Model with Stochastic Interest Rates
+
+This module implements a hybrid equity model combining:
+1. Hull-White (extended Vasicek) interest rate model
+2. Piecewise constant equity volatility
+3. Constant correlation between equity and rates
+
+The model allows for:
+- Bootstrapping of equity volatilities from market data
+- Pricing of equity options with stochastic rates
+- Calibration verification and visualization
+"""
+
 import sys
 import os
 import numpy as np
@@ -14,8 +28,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def B_HW(t, T, alpha):
-    """Bond scaling factor for constant alpha in the Hull-White/Vasicek model."""
+def B_HW(t: float, T: float, alpha: float) -> float:
+    """
+    Calculate the Hull-White bond scaling factor B(t,T).
+    
+    In the Hull-White model, this represents the sensitivity of bond prices
+    to the short rate: B(t,T) = (1 - exp(-alpha*(T-t))) / alpha
+    
+    Args:
+        t: Start time
+        T: End time
+        alpha: Mean reversion speed
+        
+    Returns:
+        float: Bond scaling factor
+        
+    Raises:
+        ValueError: If T < t or alpha < 0
+    """
     if T < t:
         raise ValueError("T must be greater than or equal to t")
     if alpha < 0:
@@ -41,18 +71,32 @@ def B_HW(t, T, alpha):
     return (1.0 - np.exp(-alpha * dt)) / alpha
 
 def integrated_variance(
-    tgrid,      # array of time points, e.g. [0, ..., T]
-    sigmaS,     # piecewise constant vol array matching intervals in tgrid
-    alpha,      # mean reversion speed of short rate
-    sigma_r,    # function sigma_r(t)
-    B_func,     # function for B(t,T), e.g. B_HW
-    rho         # correlation
-):
+    tgrid: np.ndarray,
+    sigmaS: np.ndarray,
+    alpha: float,
+    sigma_r: Callable[[float], float],
+    B_func: Callable[[float, float, float], float],
+    rho: float
+) -> float:
     """
-    Compute the integral of
-       [sigma_S(t)^2 + 2 rho sigma_S(t)*B(t,T)*sigma_r(t) + (B(t,T)*sigma_r(t))^2]
-    over t in [0, tgrid[-1]], using piecewise constant sigmaS(t) on sub-intervals.
-    We'll do simple trapezoidal integration on each sub-interval [tgrid[i], tgrid[i+1]].
+    Compute the integrated variance for the hybrid equity-rate model.
+    
+    This function calculates the total integrated instantaneous variance
+    of log(S(T)) under the T-forward measure, accounting for:
+    - Equity volatility contribution
+    - Interest rate volatility contribution
+    - Cross-term due to correlation
+    
+    Args:
+        tgrid: Array of time points [0, t1, ..., T]
+        sigmaS: Array of piecewise constant equity vols
+        alpha: Hull-White mean reversion speed
+        sigma_r: Function t -> sigma_r(t) for rate volatility
+        B_func: Bond scaling factor function (e.g., B_HW)
+        rho: Correlation between equity and rates
+        
+    Returns:
+        float: Total integrated variance
     """
     n = len(tgrid) - 1
     total = 0.0
@@ -74,14 +118,33 @@ def integrated_variance(
     return total
 
 def implied_vol(
-    tgrid,
-    sigmaS,     # piecewise constant vol array
-    alpha,
-    sigma_r,
-    B_func,
-    rho
-):
-    """Compute BS implied vol with improved numerical stability."""
+    tgrid: np.ndarray,
+    sigmaS: np.ndarray,
+    alpha: float,
+    sigma_r: Callable[[float], float],
+    B_func: Callable[[float, float, float], float],
+    rho: float
+) -> float:
+    """
+    Compute Black-Scholes implied volatility for given parameters.
+    
+    The implied volatility is computed as sqrt(integrated_variance / T),
+    where T is the option maturity (last point in tgrid).
+    
+    Args:
+        tgrid: Array of time points [0, t1, ..., T]
+        sigmaS: Array of piecewise constant equity vols
+        alpha: Hull-White mean reversion speed
+        sigma_r: Rate volatility function
+        B_func: Bond scaling factor function
+        rho: Equity-rate correlation
+        
+    Returns:
+        float: Black-Scholes implied volatility
+        
+    Raises:
+        ValueError: If maturity T <= 0
+    """
     T = tgrid[-1]
     if T <= 0:
         raise ValueError("Maturity must be positive")
@@ -89,8 +152,22 @@ def implied_vol(
     var_T = integrated_variance(tgrid, sigmaS, alpha, sigma_r, B_func, rho)
     return np.sqrt(var_T / T)
 
-def bs_call_price(F, K, T, vol):
-    """Standard Black-Scholes call price with validation."""
+def bs_call_price(F: float, K: float, T: float, vol: float) -> float:
+    """
+    Calculate Black-Scholes call option price on a forward.
+    
+    Args:
+        F: Forward price
+        K: Strike price
+        T: Time to maturity
+        vol: Volatility
+        
+    Returns:
+        float: Call option price
+        
+    Raises:
+        ValueError: If T < 0, vol < 0, F <= 0, or K <= 0
+    """
     if T < 0:
         raise ValueError("Time to maturity must be non-negative")
     if vol < 0:
@@ -108,22 +185,39 @@ def bs_call_price(F, K, T, vol):
     return F*norm.cdf(d1) - K*norm.cdf(d2)
 
 def option_price_hw_equity(
-    S0,
-    K,
-    T,
-    P0T,
-    sigmaS,
-    tgrid,
-    alpha,
-    sigma_r,
-    B_func,
-    rho
-):
+    S0: float,
+    K: float,
+    T: float,
+    P0T: float,
+    sigmaS: np.ndarray,
+    tgrid: np.ndarray,
+    alpha: float,
+    sigma_r: Callable[[float], float],
+    B_func: Callable[[float, float, float], float],
+    rho: float
+) -> float:
     """
-    Price a European call under Hull-White + piecewise constant equity vol on [0..T].
-    1) Compute the implied vol for maturity T.
-    2) Price via standard Black-Scholes on forward F0 = S0 / P0T.
-    3) Multiply by P0T to get present value.
+    Price a European call under the hybrid Hull-White equity model.
+    
+    The pricing is done in three steps:
+    1. Compute implied vol including rate effects
+    2. Transform to forward measure using P0T
+    3. Apply Black-Scholes formula
+    
+    Args:
+        S0: Initial stock price
+        K: Strike price
+        T: Option maturity
+        P0T: Zero-coupon bond price P(0,T)
+        sigmaS: Array of piecewise constant equity vols
+        tgrid: Array of time points
+        alpha: Hull-White mean reversion
+        sigma_r: Rate volatility function
+        B_func: Bond scaling function
+        rho: Equity-rate correlation
+        
+    Returns:
+        float: Call option price
     """
     volT = implied_vol(tgrid, sigmaS, alpha, sigma_r, B_func, rho)
     F0 = S0 / P0T
@@ -131,15 +225,36 @@ def option_price_hw_equity(
     return P0T * call_bs
 
 def bootstrap_sigmaS(
-    maturities,     # sorted array of maturities [T1, T2, ...]
-    market_vols,    # corresponding implied vols
-    alpha,
-    sigma_r,
-    B_func,
-    rho,
-    npts_per_interval=2
-):
-    """Bootstrap with improved convergence."""
+    maturities: np.ndarray,
+    market_vols: np.ndarray,
+    alpha: float,
+    sigma_r: Callable[[float], float],
+    B_func: Callable[[float, float, float], float],
+    rho: float,
+    npts_per_interval: int = 2
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Bootstrap piecewise constant equity volatilities from market data.
+    
+    Given a set of market implied vols at different maturities, this function
+    solves for piecewise constant equity volatilities that reproduce the
+    market implied vols when combined with the Hull-White rate model.
+    
+    Args:
+        maturities: Array of option maturities
+        market_vols: Array of market implied vols
+        alpha: Hull-White mean reversion
+        sigma_r: Rate volatility function
+        B_func: Bond scaling function
+        rho: Equity-rate correlation
+        npts_per_interval: Number of grid points per interval
+        
+    Returns:
+        tuple: (time grid, bootstrapped volatilities)
+        
+    Raises:
+        ValueError: If inputs are invalid or inconsistent
+    """
     if len(maturities) != len(market_vols):
         raise ValueError("Maturities and market_vols must have same length")
     if not np.all(np.diff(maturities) > 0):
@@ -215,7 +330,17 @@ def bootstrap_sigmaS(
     return tgrid_full, sigmaS_vals
 
 def extend_piecewise_constant(x: np.ndarray, y: np.ndarray, x_new: np.ndarray) -> np.ndarray:
-    """Extend piecewise constant function to new x points."""
+    """
+    Extend a piecewise constant function to new x points.
+    
+    Args:
+        x: Original x points defining intervals
+        y: Values for each interval
+        x_new: New x points to evaluate at
+        
+    Returns:
+        np.ndarray: Values at x_new points
+    """
     y_new = np.zeros_like(x_new)
     for i, xi in enumerate(x_new):
         idx = np.searchsorted(x, xi, side='right') - 1
@@ -230,9 +355,29 @@ def verify_calibration(
     alpha: float,
     sigma_r: Callable[[float], float],
     rho: float,
-    num_test_points: int = 100  # Increased for smoother plots
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Verify calibration by bootstrapping stock vols and recomputing implied vols."""
+    num_test_points: int = 100
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Verify calibration by comparing market and model implied vols.
+    
+    This function:
+    1. Bootstraps equity vols from market data
+    2. Creates a dense test grid
+    3. Computes model implied vols
+    4. Returns data for visualization
+    
+    Args:
+        maturities: Option maturities
+        market_vols: Market implied vols
+        alpha: Hull-White mean reversion
+        sigma_r: Rate volatility function
+        rho: Equity-rate correlation
+        num_test_points: Number of points for testing
+        
+    Returns:
+        tuple: (test times, interpolated market vols,
+                stock vols, recomputed implied vols)
+    """
     logger.info("Starting calibration verification...")
     
     # Bootstrap stock volatilities
@@ -275,7 +420,24 @@ def plot_calibration_results(
     sigma_r: Callable[[float], float],
     rho: float,
 ) -> None:
-    """Plot calibration results in two separate subplots."""
+    """
+    Plot calibration results in two panels.
+    
+    Creates two side-by-side plots:
+    1. Market implied vols vs bootstrapped stock vols
+    2. Market vs model implied vols with error metrics
+    
+    Args:
+        maturities: Option maturities
+        market_vols: Market implied vols
+        test_maturities: Dense time grid for plotting
+        interp_market_vols: Interpolated market vols
+        stock_vols: Bootstrapped stock vols
+        recomputed_vols: Model implied vols
+        alpha: Hull-White mean reversion
+        sigma_r: Rate volatility function
+        rho: Equity-rate correlation
+    """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     
     # Plot 1: Volatility Term Structures
@@ -327,7 +489,14 @@ def plot_calibration_results(
     plt.show()
 
 def main():
-    """Main function to demonstrate the Hull-White + BS hybrid model."""
+    """
+    Demonstrate the Hull-White equity model functionality.
+    
+    Creates sample market data and shows:
+    1. Bootstrapping of stock vols
+    2. Calibration verification
+    3. Visualization of results
+    """
     try:
         logger.info("Starting Hull-White + BS hybrid model calculation")
         
