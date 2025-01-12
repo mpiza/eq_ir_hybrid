@@ -214,11 +214,11 @@ class CalibrationApp:
             maturities, market_vols = self.market_frame.get_data()
             alpha, rho, sigma_r, int_method, points = self.model_frame.get_params()
 
-            # Run calibration
-            test_mats, interp_vols, stock_vols, recomp_vols = verify_calibration(
+            # Run calibration - now expects 5 return values
+            test_mats, interp_vols, stock_vols, recomp_vols, sigmaS_vals = verify_calibration(
                 maturities, market_vols, alpha, sigma_r, rho, 
                 num_test_points=200, 
-                npts_per_interval=points,  # Added parameter
+                npts_per_interval=points,
                 method=int_method
             )
 
@@ -231,7 +231,8 @@ class CalibrationApp:
                 test_mats, interp_vols,
                 stock_vols, recomp_vols,
                 alpha, sigma_r, rho,
-                points  # Added parameter
+                points,
+                sigmaS_vals  # Pass the sigmaS_vals to plotting function
             )
 
         except Exception as e:

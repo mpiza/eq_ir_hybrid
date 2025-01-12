@@ -123,6 +123,7 @@ def integrated_variance(
     Returns:
         float: Total integrated variance
     """
+    T = tgrid[-1]  # Final maturity
     n = len(tgrid) - 1
     total = 0.0
 
@@ -132,7 +133,9 @@ def integrated_variance(
         sS = sigmaS[i]
 
         def integrand(t):
-            Br = B_func(t, tgrid[-1], alpha)
+            # Ensure t is never greater than T when computing B
+            t_bounded = min(t, T)
+            Br = B_func(t_bounded, T, alpha)
             sr = sigma_r(t)
             return sS**2 + 2*rho*sS*Br*sr + (Br*sr)**2
 
@@ -316,6 +319,7 @@ def bootstrap_sigmaS(
             seg_times.extend(maturities[:i])
             seg_times.append(T)
             seg_times = np.array(seg_times)
+            seg_times.sort()  # Ensure times are strictly increasing
 
             # Build array of volatilities for each segment
             seg_sigma = []
@@ -384,17 +388,29 @@ def bootstrap_sigmaS(
         
         sigmaS_vals.append(x)
         
-        # Verify accuracy
+        # Verify accuracy using the same approach as in optimization
+        seg_times = [0.0]
+        seg_times.extend(maturities[:i])
+        seg_times.append(T)
+        seg_times = np.array(seg_times)
+        
+        test_vols = []
+        for j in range(i):
+            test_vols.append(sigmaS_vals[j])
+        test_vols.append(x)
+        
         test_vol = implied_vol(
-            np.array([0.0, T]),
-            np.array([x]),
+            np.array(seg_times),
+            np.array(test_vols),
             alpha, sigma_r, B_func, rho,
             method=method
         )
+        
         error = abs(test_vol - market_vols[i])
         if error > 1e-6:
             logger.warning(f"Large calibration error at T={T}: {error:.2e}")
 
+    print(f"tgrid_full: {tgrid_full}, sigmaS_vals: {sigmaS_vals}")
     return tgrid_full, sigmaS_vals
 
 def extend_piecewise_constant(x: np.ndarray, y: np.ndarray, x_new: np.ndarray) -> np.ndarray:
@@ -423,53 +439,71 @@ def verify_calibration(
     alpha: float,
     sigma_r: Callable[[float], float],
     rho: float,
-    num_test_points: int = 400,  # Doubled
-    npts_per_interval: int = 20,  # Doubled
+    num_test_points: int = 400,
+    npts_per_interval: int = 20,
     method: str = "simpson"
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:  # Added sigmaS_vals to return
     """Enhanced verification with finer grid."""
     logger.info("Starting calibration verification...")
-    
-    # Use more points for longer maturities
-    adjusted_npts = [max(npts_per_interval, int(T * 10)) for T in maturities]
     
     # Bootstrap with enhanced accuracy
     _, sigmaS_vals = bootstrap_sigmaS(
         maturities, market_vols,
         alpha, sigma_r, B_HW, rho,
-        npts_per_interval=max(adjusted_npts),
+        npts_per_interval=npts_per_interval,
         method=method,
         tolerance=1e-14
     )
     
-    # Create denser non-uniform test grid
-    test_maturities = np.concatenate([
-        np.linspace(0, 0.25, num_test_points // 3),  # More points near zero
-        np.linspace(0.25, 1.0, num_test_points // 3),  # More points in middle
-        np.linspace(1.0, maturities[-1], num_test_points // 3)  # Points for longer maturities
-    ])
-    test_maturities = np.unique(np.sort(test_maturities))
+    # Create test grid properly spanning all intervals
+    pieces = []
+    # Start from a small positive number instead of 0 to avoid the spike
+    eps = 1e-6  # Small positive number
+    for i in range(len(maturities)-1):
+        pieces.append(np.linspace(maturities[i], maturities[i+1], num_test_points//len(maturities)))
+    # Add points from eps (near zero) to first maturity
+    pieces.insert(0, np.linspace(eps, maturities[0], num_test_points//len(maturities)))
     
-    # Extend piecewise constant stock vols to test points
+    test_maturities = np.unique(np.sort(np.concatenate(pieces)))
+    
+    # Extend stock vols to test points
     stock_vols = extend_piecewise_constant(maturities, np.array(sigmaS_vals), test_maturities)
     
-    # Recompute implied vols at test points
+    # Recompute implied vols at test points using full history
     recomputed_vols = np.zeros_like(test_maturities)
     for i, T in enumerate(test_maturities):
-        if T > 0:  # Skip t=0 point
-            test_tgrid = np.array([0.0, T])
-            test_sigmaS = np.array([stock_vols[i]])
+        if T > 0:  # Changed to handle very small but positive T
+            idx = np.searchsorted(maturities, T)
+            # Build time grid ensuring strict ordering and proper bounds
+            prev_times = maturities[:idx]
+            prev_times = prev_times[prev_times < T]
+            times = np.array([0.0] + list(prev_times) + [T])
+            
+            # Build vols array matching the time grid structure
+            vols = np.zeros(len(times)-1)  # One less than times since we need vol per interval
+            for j in range(len(vols)):
+                t_mid = 0.5 * (times[j] + times[j+1])  # Use midpoint to determine vol
+                idx_vol = np.searchsorted(maturities, t_mid) - 1
+                idx_vol = max(0, min(idx_vol, len(sigmaS_vals)-1))
+                vols[j] = sigmaS_vals[idx_vol]
+            
             recomputed_vols[i] = implied_vol(
-                test_tgrid, test_sigmaS,
+                times,
+                vols,
                 alpha, sigma_r, B_HW, rho,
                 method=method
             )
     
-    # Linear interpolation of market vols for comparison
+    # For the first point (T ≈ 0), use the limit value
+    if len(recomputed_vols) > 0:
+        recomputed_vols[0] = recomputed_vols[1]  # Use the next point's value
+    
+    # Linear interpolation of market vols
     interp_market_vols = np.interp(test_maturities, maturities, market_vols)
     
     logger.info("Calibration verification completed")
-    return test_maturities, interp_market_vols, stock_vols, recomputed_vols
+    print(f"test_maturities: {test_maturities}, interp_market_vols: {interp_market_vols}, stock_vols: {stock_vols}, recomputed_vols: {recomputed_vols}")
+    return test_maturities, interp_market_vols, stock_vols, recomputed_vols, sigmaS_vals  # Added sigmaS_vals
 
 def plot_calibration_results(
     maturities: np.ndarray,
@@ -482,6 +516,7 @@ def plot_calibration_results(
     sigma_r: Callable[[float], float],
     rho: float,
     npts_per_interval: int,  # Added parameter
+    sigmaS_vals: np.ndarray,  # Added parameter
 ) -> None:
     """
     Plot calibration results in two panels.
@@ -501,6 +536,7 @@ def plot_calibration_results(
         sigma_r: Rate volatility function
         rho: Equity-rate correlation
         npts_per_interval: Number of points per interval in bootstrapping
+        sigmaS_vals: Bootstrapped sigmaS values
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     
@@ -515,39 +551,62 @@ def plot_calibration_results(
     ax1.grid(True)
     ax1.legend(loc='upper left')
     
-    # Plot 2: Calibration Check
-    # Market vols
-    ax2.plot(maturities, market_vols, 'ko', label='Market Implied Vols', 
-             markersize=8, markerfacecolor='white')
-    ax2.plot(test_maturities, interp_market_vols, 'k--', alpha=0.5, 
-             label='Market (interpolated)')
+    # Plot 2: Volatility Differences
+    ax2.axhline(y=0, color='k', linestyle='-', alpha=0.2)  # Zero line
     
-    # Model implied vols at market maturities
-    model_vols_at_market = np.array([
-        implied_vol(
-            np.array([0.0, T]),
-            np.array([extend_piecewise_constant(maturities, stock_vols, np.array([T]))[0]]),
-            alpha, sigma_r, B_HW, rho
-        ) for T in maturities
-    ])
+    # Calculate model vols and differences consistently
+    model_vols = np.zeros_like(test_maturities)
     
-    # Plot model vols with same style as market
-    ax2.plot(maturities, model_vols_at_market, 'ro', 
-             label='Model Implied Vols', markersize=8, markerfacecolor='white')
-    ax2.plot(test_maturities, recomputed_vols, 'r--', alpha=0.5,
-             label='Model (interpolated)')
+    # First calculate model vols exactly at market points
+    model_vols_at_market = np.zeros_like(maturities)
+    for i, T in enumerate(maturities):
+        if T > 0:  # Skip T=0
+            times = np.array([0.0] + list(maturities[:i]) + [T])
+            vols = np.array([sigmaS_vals[0]] + sigmaS_vals[:i] + [sigmaS_vals[min(i, len(sigmaS_vals)-1)]])
+            
+            model_vols_at_market[i] = implied_vol(
+                times, vols,
+                alpha, sigma_r, B_HW, rho,
+                method="simpson"
+            )
+    
+    # Then calculate model vols for all test points
+    for i, T in enumerate(test_maturities):
+        if T > 0:  # Skip T=0
+            idx = np.searchsorted(maturities, T)
+            times = np.array([0.0] + list(maturities[:idx]) + [T])
+            times.sort()  # Ensure times are strictly increasing
+            vols = np.array([sigmaS_vals[0]] + sigmaS_vals[:idx] + [sigmaS_vals[min(idx, len(sigmaS_vals)-1)]])
+            
+            model_vols[i] = implied_vol(
+                times, vols,
+                alpha, sigma_r, B_HW, rho,
+                method="simpson"
+            )
+    
+    # Calculate differences in basis points
+    diff_at_test = (model_vols - interp_market_vols) * 10000
+    diff_at_market = (model_vols_at_market - market_vols) * 10000
+    
+    # Plot differences
+    ax2.plot(test_maturities, diff_at_test, 'r-', label='Model - Market', alpha=0.5)
+    ax2.plot(maturities, diff_at_market, 'ro', 
+             label='At Market Points', markersize=8, markerfacecolor='white')
     
     ax2.set_xlabel('Maturity (years)')
-    ax2.set_ylabel('Implied Volatility')
-    ax2.set_title('Calibration Verification')  # Changed from setTitle to set_title
+    ax2.set_ylabel('Difference (bps)')
+    ax2.set_title('Calibration Error')
     ax2.grid(True)
     ax2.legend(loc='upper left')
     
     # Add calibration error and model parameters
-    max_error = np.max(np.abs(model_vols_at_market - market_vols))
+    max_error = np.max(np.abs(diff_at_market))
+    mean_error = np.mean(np.abs(diff_at_market))
+    rmse = np.sqrt(np.mean(diff_at_market**2))
     info_text = (
-        f'Max Error: {max_error:.2e}\n'
-        f'Points per interval: {npts_per_interval}\n'
+        f'Max Error: {max_error:.1f} bps\n'
+        f'Mean Error: {mean_error:.1f} bps\n'
+        f'RMSE: {rmse:.1f} bps\n'
         f'α: {alpha:.3f}, ρ: {rho:.2f}'
     )
     ax2.text(0.02, 0.98, info_text, 
@@ -578,7 +637,7 @@ def main():
         npts_per_interval = 2  # Number of points per interval in bootstrapping
 
         # Verify calibration with more test points
-        test_mats, interp_vols, stock_vols, recomp_vols = verify_calibration(
+        test_mats, interp_vols, stock_vols, recomp_vols, sigmaS_vals = verify_calibration(  # Added sigmaS_vals
             maturities, market_vols,
             alpha, sigma_r_func, rho,
             num_test_points=400,  # Increased
@@ -592,7 +651,8 @@ def main():
             test_mats, interp_vols,
             stock_vols, recomp_vols,
             alpha, sigma_r_func, rho,  # Added model parameters
-            npts_per_interval  # Added parameter
+            npts_per_interval,  # Added parameter
+            sigmaS_vals  # Added parameter
         )
         
         logger.info("Calibration and plotting completed")
