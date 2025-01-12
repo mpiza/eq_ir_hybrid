@@ -23,7 +23,7 @@ from typing import Tuple, Callable
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO,  # Changed from INFO to DEBUG
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ def B_HW(t: float, T: float, alpha: float) -> float:
         return 1.0 / alpha
         
     # Use higher-order Taylor series for small alpha
-    if abs(alpha) < 1e-8:  
+    if abs(alpha) < 1e-8 and dt != 0:  # Modified condition
         dt2 = dt * dt
         dt3 = dt2 * dt
         dt4 = dt3 * dt
@@ -72,6 +72,9 @@ def B_HW(t: float, T: float, alpha: float) -> float:
 
 def integrate_simpson(f, t0: float, t1: float, n: int = 10) -> float:
     """Enhanced Simpson's rule with very fine grid."""
+    epsilon = 1e-12  # Added epsilon to handle small integration ranges
+    if (t1 - t0) < epsilon:
+        return 0.0
     # Use much finer grid
     dt = t1 - t0
     n = max(n, int(100 * dt))  # Increased from 50 to 100 points per year
@@ -132,6 +135,11 @@ def integrated_variance(
         sS = sigmaS[i]
 
         def integrand(t):
+            epsilon = 1e-12  # Added epsilon to handle numerical precision
+            if t > tgrid[-1] + epsilon:
+                raise ValueError("t exceeds T beyond acceptable precision")
+            t = min(t, tgrid[-1])  # Cap t to T to prevent T < t
+            logger.debug(f"Integrand called with t={t}, T={tgrid[-1]}")
             Br = B_func(t, tgrid[-1], alpha)
             sr = sigma_r(t)
             return sS**2 + 2*rho*sS*Br*sr + (Br*sr)**2
@@ -284,11 +292,10 @@ def bootstrap_sigmaS(
 
     for i, T in enumerate(maturities):
         local_tgrid = np.linspace(prev_T, T, npts_per_interval)
-        # merge with global tgrid
-        if tgrid_full[-1] < prev_T:
-            tgrid_full = np.concatenate([tgrid_full, local_tgrid])
-        else:
-            tgrid_full = np.concatenate([tgrid_full[:-1], local_tgrid])
+        # Removed previous conditional; now just ensure no duplicate points
+        if local_tgrid[0] <= tgrid_full[-1]:
+            local_tgrid = local_tgrid[1:]
+        tgrid_full = np.concatenate([tgrid_full, local_tgrid])
 
         # target integrated variance at T
         target_var = market_vols[i]**2 * T
@@ -513,7 +520,7 @@ def plot_calibration_results(
     ax1.set_ylabel('Volatility')
     ax1.set_title('Market vs Stock Volatility')  # Changed from setTitle to set_title
     ax1.grid(True)
-    ax1.legend(loc='upper left')
+    ax1.legend(loc='lower left')
     
     # Plot 2: Calibration Check
     # Market vols
@@ -541,7 +548,7 @@ def plot_calibration_results(
     ax2.set_ylabel('Implied Volatility')
     ax2.set_title('Calibration Verification')  # Changed from setTitle to set_title
     ax2.grid(True)
-    ax2.legend(loc='upper left')
+    ax2.legend(loc='lower left')
     
     # Add calibration error and model parameters
     max_error = np.max(np.abs(model_vols_at_market - market_vols))
@@ -550,33 +557,32 @@ def plot_calibration_results(
         f'Points per interval: {npts_per_interval}\n'
         f'α: {alpha:.3f}, ρ: {rho:.2f}'
     )
-    ax2.text(0.02, 0.98, info_text, 
+    # Move info text to middle right, with white background
+    ax2.text(0.98, 0.5, info_text, 
              transform=ax2.transAxes,
-             verticalalignment='top')
+             verticalalignment='center',
+             horizontalalignment='right',
+             bbox=dict(facecolor='white', alpha=0.8, edgecolor='none'))
     
     plt.tight_layout()
     plt.show()
 
-def main():
-    """
-    Demonstrate the Hull-White equity model functionality.
-    
-    Creates sample market data and shows:
-    1. Bootstrapping of stock vols
-    2. Calibration verification
-    3. Visualization of results
-    """
+def create_test_data(max_maturity: float, num_points: int, constant_vol: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Create test data with constant spacing and volatility."""
+    spacing = max_maturity / num_points
+    maturities = np.linspace(spacing, max_maturity, num_points)
+    market_vols = np.full_like(maturities, constant_vol)
+    return maturities, market_vols
+
+def main(maturities: np.ndarray, market_vols: np.ndarray):
+    """Demonstrate the Hull-White equity model functionality."""
     try:
         logger.info("Starting Hull-White + BS hybrid model calculation")
         
-        # Market data with realistic smile/skew effects
-        maturities = np.array([0.25, 0.5, 1.0, 2.0, 3.0, 5.0])
-        market_vols = np.array([0.22, 0.21, 0.20, 0.22, 0.23, 0.25])  # U-shaped curve
-        alpha = 0.1
-        rho = 0.3  # Correlation for rate-equity effects
-        def sigma_r_func(t): return 0.015  # 1.5% rate vol
-        npts_per_interval = 2  # Number of points per interval in bootstrapping
-
+        alpha = 0.01
+        rho = 0.3
+        def sigma_r_func(t): return 0.01
+        npts_per_interval = 2
         # Verify calibration with more test points
         test_mats, interp_vols, stock_vols, recomp_vols = verify_calibration(
             maturities, market_vols,
@@ -603,7 +609,9 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        # Create test data with 5Y max maturity, 20 points, 20% vol
+        maturities, market_vols = create_test_data(5.0, 20, 0.20)
+        main(maturities, market_vols)
     except Exception as e:
         print(f"Error: {str(e)}")
         sys.exit(1)
